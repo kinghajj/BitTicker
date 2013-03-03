@@ -42,14 +42,20 @@ getHTTP url = getResponseBody =<< simpleHTTP (getRequest url)
 getHTTPDouble :: String -> IO Double
 getHTTPDouble = (read <$>) . getHTTP
 
+newtype BTCPrice = BTCPrice Double
+newtype NetHashRate = NetHashRate Double
+
+data Results = Results { btcPrice :: BTCPrice, netHashRate :: NetHashRate }
+
 -- fetch the price of BTC
-getPriceOfBTC :: IO Double
-getPriceOfBTC = (**(-1)) <$> getHTTPDouble url
+getPriceOfBTC :: IO BTCPrice
+getPriceOfBTC = BTCPrice . (**(-1)) <$> getHTTPDouble url
   where url = "http://blockchain.info/tobtc?currency=USD&value=1"
 
 -- fetch the network hash rate
-getNetHashRate :: IO Double
-getNetHashRate = (/) <$> getHTTPDouble "http://blockexplorer.com/q/hashestowin"
+getNetHashRate :: IO NetHashRate
+getNetHashRate = fmap NetHashRate $
+                 (/) <$> getHTTPDouble "http://blockexplorer.com/q/hashestowin"
                      <*> getHTTPDouble "http://blockexplorer.com/q/interval/144"
 
 -- compute weekly mining income given a current network rate
@@ -57,16 +63,18 @@ weeklyMiningIncome :: Double -> Double
 weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
 
 -- fetch and bundle the BTC price and network hash rate
-fetch :: IO (Double, Double)
-fetch = timedLog "fetching\r" >> (,) <$> getPriceOfBTC <*> getNetHashRate
+fetch :: IO Results
+fetch = timedLog "fetching\r" >> Results <$> getPriceOfBTC <*> getNetHashRate
 
 -- display the fetched results
-display :: (Double, Double) -> IO ()
-display (btcPrice, netRate) =
-  let weeklyBTC = weeklyMiningIncome netRate
-      weeklyUSD = weeklyBTC * btcPrice
-      fmt       = "$%.5f (%.5f/$%.5f weekly)\n"
-  in  timedLog $ printf fmt btcPrice weeklyBTC weeklyUSD
+display :: Results -> IO ()
+display results =
+  let (BTCPrice p)     = btcPrice results
+      (NetHashRate hr) = netHashRate results
+      weeklyBTC        = weeklyMiningIncome hr
+      weeklyUSD        = weeklyBTC * p
+      fmt              = "$%.5f (%.5f/$%.5f weekly)\n"
+  in  timedLog $ printf fmt p weeklyBTC weeklyUSD
 
 -- repeat some action at a given interval
 every :: Int -> IO () -> IO ()
