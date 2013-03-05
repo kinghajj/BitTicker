@@ -9,14 +9,16 @@
 module Main where
 
 import Control.Applicative    ( (<$>), (<*>))
-import Control.Concurrent     ( forkIO, threadDelay)
+import Control.Concurrent     ( forkIO, threadDelay
+                              , MVar, newMVar, putMVar, takeMVar)
 import Control.Exception      ( IOException, catch)
-import Control.Monad          ( forever, void)
+import Control.Monad          ( forever, void, when)
 import Network.HTTP           ( getRequest, getResponseBody, simpleHTTP)
 import Prelude hiding         ( catch)
 import System.Console.CmdArgs ( Data, Typeable, (&=), cmdArgs, help, summary)
 import System.IO              ( BufferMode(..), hSetBuffering, stdout)
 import System.Locale          ( defaultTimeLocale)
+import System.Process         ( system)
 import System.Time            ( formatCalendarTime, getClockTime
                               , toCalendarTime)
 import Text.Printf            ( printf)
@@ -44,6 +46,9 @@ newtype NetHashRate = NetHashRate Double
 
 data Results = Results { btcPrice :: BTCPrice, netHashRate :: NetHashRate }
 
+emptyResults :: Results
+emptyResults = Results (BTCPrice 0.0) (NetHashRate 0.0)
+
 -- fetch the price of BTC
 fetchPriceOfBTC :: IO BTCPrice
 fetchPriceOfBTC = BTCPrice . (**(-1)) <$> readHTTP url
@@ -64,13 +69,19 @@ fetch :: IO Results
 fetch = timedLog "fetching\r" >> Results <$> fetchPriceOfBTC <*> fetchNetHashRate
 
 -- display the fetched results
-display :: Results -> IO ()
-display results =
+display :: MVar Results -> Results -> IO ()
+display prev results = do
+  presults <- takeMVar prev
   let (BTCPrice p)     = btcPrice results      -- get results
-      (NetHashRate hr) = netHashRate results   -- then calc new ones
-      wBTC             = weeklyMiningIncome hr -- weekly BTC income
-      wUSD             = wBTC * p              -- weekly USD equiv income
-  in  timedLog $ (printf "$%.5f (%.5f/$%.5f weekly)\n" p wBTC wUSD :: String)
+  let (BTCPrice pp)    = btcPrice presults
+  let (NetHashRate hr) = netHashRate results   -- then calc new ones
+  let wBTC             = weeklyMiningIncome hr -- weekly BTC income
+  let wUSD             = wBTC * p              -- weekly USD equiv income
+  timedLog $ (printf "$%.5f (%.5f/$%.5f weekly)\n" p wBTC wUSD :: String)
+  when (p /= pp) $ playSound $ if p >= pp
+    then "C:\\Windows\\Media\\tada.wav"
+    else "C:\\Windows\\Media\\chord.wav"
+  putMVar prev results
 
 -- repeat some action at a given interval
 every :: Int -> IO () -> IO ()
@@ -78,6 +89,11 @@ every interval action = forever $ do
   void $ forkIO $ catch action $ \(e :: IOException) ->
     timedLog $ printf "error: %s" $ show e
   threadDelay interval
+
+-- use powershell to play a sound file
+playSound :: String -> IO ()
+playSound path = void $ forkIO $ void $ system $ printf fmt path
+  where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
 
 -- command line options
 data Cfg = Cfg { delay :: Int } deriving (Show, Data, Typeable)
@@ -88,4 +104,5 @@ cmdCfg = Cfg { delay = 60000000 &= help "delay"}
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
-  where main' cfg = every (delay cfg) $ fetch >>= display
+  where main' cfg = do presults <- newMVar emptyResults
+                       every (delay cfg) $ fetch >>= display presults
