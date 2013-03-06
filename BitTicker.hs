@@ -43,18 +43,22 @@ timedLog :: String -> IO ()
 timedLog s = getClockTime >>= toCalendarTime >>= \t -> printf "%s: %s" (iso t) s
   where iso = formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
 
+-- use 'wget' to fetch an HTTP object
 fetchHTTP :: String -> IO ByteString
 fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
                 case mstdout of
                   Just h  -> hGetContents h
                   Nothing -> error "wget had no stdout handle???"
-  where wget = CreateProcess (ShellCommand $ printf "wget --no-check-certificate -q -O - \"%s\"" url)
+  where cmd  = "wget --no-check-certificate -q -O - \"%s\""
+        wget = CreateProcess (ShellCommand $ printf cmd url)
                              Nothing Nothing CreatePipe CreatePipe CreatePipe
                              False False
 
+-- fetch an HTTP object an attempt to read it
 readHTTP :: Read a => String -> IO a
 readHTTP url = (read . map w2c . unpack) <$> fetchHTTP url
 
+-- data structures for the MtGox HTTP API v1
 data MtgoxTicker
   = MtgoxTicker
   { _status :: Text
@@ -90,6 +94,7 @@ makeLenses ''MtgoxTicker
 makeLenses ''MtgoxResult
 makeLenses ''MtgoxStats
 
+-- instances to convert JSON object
 instance FromJSON MtgoxTicker where
   parseJSON (Object v) = MtgoxTicker <$> v .: "result" <*> v .: "return"
   parseJSON _          = mzero
@@ -125,6 +130,7 @@ instance FromJSON Currency where
 
 newtype NetHashRate = NetHashRate Double deriving (Eq, Show)
 
+-- the core results stored by the program
 data Results = Results { ticker :: MtgoxTicker, netHashRate :: NetHashRate }
 
 fetchMtgoxTicker :: IO MtgoxTicker
@@ -150,7 +156,7 @@ fetch :: IO Results
 fetch = timedLog "fetching\r" >> Results <$> fetchMtgoxTicker <*> fetchNetHashRate
 
 -- display the fetched results
-display :: MVar (Results, Double, Double) -> Results -> IO ()
+display :: MVar Results -> Results -> IO ()
 display prev results = do
   mpresults <- tryTakeMVar prev
   let curticker        = (ticker results)^.result
@@ -158,27 +164,25 @@ display prev results = do
   let curprice         = curlast_all^.value
   let curbuy           = curticker^.buy^.value
   let cursell          = curticker^.sell^.value
+  let curhigh          = curticker^.high^.value
+  let curlow           = curticker^.low^.value
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
   let wUSD             = wBTC * curprice       -- weekly USD equiv income
-  timedLog $ (printf "$%.2f $%.2f-$%.2f (%.2f/$%.2f)"
-                     curprice curbuy cursell wBTC wUSD :: String)
+  timedLog $ (printf "$%.2f $%.2f-$%.2f (%.2f/$%.2f) L$%.2f H$%.2f\n"
+                     curprice curbuy cursell wBTC wUSD curlow curhigh :: String)
   case mpresults of
-    (Just (presults, lowp, highp)) -> do
+    (Just presults) -> do
       let prevticker = (ticker presults)^.result
       let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
-      let high'      = max curprice highp
-      let low'       = min curprice lowp
-      putStr $ printf " L$%.2f H$%.2f" low' high'
       when (curprice /= prevprice && (curprice < lastbuy || curprice > lastsell)) $
         playSound $ if curprice >= prevprice
                       then "C:\\Windows\\Media\\tada.wav"
                       else "C:\\Windows\\Media\\chord.wav"
-      putMVar prev (results, low', high')
-    _ -> putMVar prev (results, curprice, curprice)
-  putChar '\n'
+    _ -> pure ()
+  putMVar prev results
 
 -- repeat some action at a given interval
 every :: Int -> IO () -> IO ()
