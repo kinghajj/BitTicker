@@ -154,7 +154,7 @@ display :: MVar Results -> Results -> IO ()
 display prev results = do
   mpresults <- tryTakeMVar prev
   let curticker        = (ticker results)^.result
-  let curlast_all      = curticker^.last_all
+  let curlast_all      = curticker^.last_local
   let curprice         = curlast_all^.value
   let curbuy           = curticker^.buy^.value
   let cursell          = curticker^.sell^.value
@@ -166,7 +166,7 @@ display prev results = do
   case mpresults of
     (Just presults) -> do
       let prevticker = (ticker presults)^.result
-      let prevprice  = prevticker^.last_all^.value
+      let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
       when (curprice /= prevprice && (curprice < lastbuy || curprice > lastsell)) $
