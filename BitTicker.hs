@@ -30,6 +30,9 @@ import System.Time            ( formatCalendarTime, getClockTime
                               , toCalendarTime)
 import Text.Printf            ( printf)
 
+--------------------------------------------------------------------------------
+-- Configuration
+
 -- number of BTC allocated per second, assuming 25 BTC per 10 minutes
 btcPerSec :: Double
 btcPerSec = 0.04167
@@ -38,10 +41,25 @@ btcPerSec = 0.04167
 myRate :: Double
 myRate = 30e9
 
+-- the sounds to play on significant price changes
+upSound, downSound :: String
+upSound = "C:\\Windows\\Media\\tada.wav"
+downSound = "C:\\Windows\\Media\\chord.wav"
+
+--------------------------------------------------------------------------------
+-- Utility functions
+
 -- output a string with an ISO8601 timestamp
 timedLog :: String -> IO ()
 timedLog s = getClockTime >>= toCalendarTime >>= \t -> printf "%s: %s" (iso t) s
   where iso = formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
+
+-- repeat some action at a given interval
+every :: Int -> IO () -> IO ()
+every interval action = forever $ do
+  void $ forkIO $ catch action $ \(e :: IOException) ->
+    timedLog $ printf "error: %s" $ show e
+  threadDelay interval
 
 -- use 'wget' to fetch an HTTP object
 fetchHTTP :: String -> IO ByteString
@@ -57,6 +75,14 @@ fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
 -- fetch an HTTP object an attempt to read it
 readHTTP :: Read a => String -> IO a
 readHTTP url = (read . map w2c . unpack) <$> fetchHTTP url
+
+-- use powershell to play a sound file
+playSound :: String -> IO ()
+playSound path = void $ forkIO $ void $ system $ printf fmt path
+  where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
+
+--------------------------------------------------------------------------------
+-- Ticker data structures
 
 -- data structures for the MtGox HTTP API v1
 data MtgoxTicker
@@ -133,6 +159,9 @@ newtype NetHashRate = NetHashRate Double deriving (Eq, Show)
 -- the core results stored by the program
 data Results = Results { ticker :: MtgoxTicker, netHashRate :: NetHashRate }
 
+--------------------------------------------------------------------------------
+-- Ticker info fetching
+
 fetchMtgoxTicker :: IO MtgoxTicker
 fetchMtgoxTicker = (decode <$> fetchHTTP url) >>= \mt ->
                    case mt of
@@ -141,23 +170,31 @@ fetchMtgoxTicker = (decode <$> fetchHTTP url) >>= \mt ->
 
   where url = "https://mtgox.com/api/1/BTCUSD/ticker"
 
+
 -- fetch the network hash rate
 fetchNetHashRate :: IO NetHashRate
 fetchNetHashRate = fmap NetHashRate $
                    (/) <$> readHTTP "http://blockexplorer.com/q/hashestowin"
                        <*> readHTTP "http://blockexplorer.com/q/interval/144"
 
+--------------------------------------------------------------------------------
+-- Addition info calculations
+
 -- compute weekly mining income given a current network rate
 weeklyMiningIncome :: Double -> Double
 weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
 
+--------------------------------------------------------------------------------
+-- Main program
+
 -- fetch and bundle the BTC price and network hash rate
 fetch :: IO Results
-fetch = timedLog "fetching\r" >> Results <$> fetchMtgoxTicker <*> fetchNetHashRate
+fetch = timedLog "fetching\r" >>
+        Results <$> fetchMtgoxTicker <*> fetchNetHashRate
 
 -- display the fetched results
-display :: MVar Results -> Results -> IO ()
-display prev results = do
+display :: MVar Results -> Cfg -> Results -> IO ()
+display prev cfg results = do
   mpresults <- tryTakeMVar prev
   let curticker        = (ticker results)^.result
   let curlast_all      = curticker^.last_local
@@ -177,33 +214,25 @@ display prev results = do
       let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
-      when (curprice /= prevprice && (curprice < lastbuy || curprice > lastsell)) $
+      let changed    = curprice /= prevprice
+      let outside    = curprice < lastbuy || curprice > lastsell
+      when (playSounds cfg && changed && outside) $
         playSound $ if curprice >= prevprice
                       then "C:\\Windows\\Media\\tada.wav"
                       else "C:\\Windows\\Media\\chord.wav"
     _ -> pure ()
   putMVar prev results
 
--- repeat some action at a given interval
-every :: Int -> IO () -> IO ()
-every interval action = forever $ do
-  void $ forkIO $ catch action $ \(e :: IOException) ->
-    timedLog $ printf "error: %s" $ show e
-  threadDelay interval
-
--- use powershell to play a sound file
-playSound :: String -> IO ()
-playSound path = void $ forkIO $ void $ system $ printf fmt path
-  where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
-
 -- command line options
-data Cfg = Cfg { delay :: Int } deriving (Show, Data, Typeable)
+data Cfg = Cfg { delay :: Int, playSounds :: Bool}
+         deriving (Show, Data, Typeable)
 
 cmdCfg :: Cfg
-cmdCfg = Cfg { delay = 10000000 &= help "delay"}
+cmdCfg = Cfg { delay = 10000000  &= help "delay"
+             , playSounds = True &= help "play sounds"}
          &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
   where main' cfg = do presults <- newEmptyMVar
-                       every (delay cfg) $ fetch >>= display presults
+                       every (delay cfg) $ fetch >>= display presults cfg
