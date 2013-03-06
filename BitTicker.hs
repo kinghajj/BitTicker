@@ -4,21 +4,28 @@
 --                                                                            --
 --------------------------------------------------------------------------------
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wall -O2 -rtsopts #-}
 module Main where
 
-import Control.Applicative    ( (<$>), (<*>))
+import Control.Applicative    ( (<$>), (<*>), pure)
 import Control.Concurrent     ( forkIO, threadDelay
-                              , MVar, newMVar, putMVar, takeMVar)
+                              , MVar, newEmptyMVar, putMVar, tryTakeMVar)
 import Control.Exception      ( IOException, catch)
-import Control.Monad          ( forever, void, when)
-import Network.HTTP           ( getRequest, getResponseBody, simpleHTTP)
+import Control.Lens           ( (^.), makeLenses)
+import Control.Monad          ( forever, mzero, void, when)
+import Data.Aeson
+import Data.ByteString.Internal (w2c)
+import Data.ByteString.Lazy   ( ByteString, hGetContents, unpack)
+import Data.Text              ( Text)
 import Prelude hiding         ( catch)
 import System.Console.CmdArgs ( Data, Typeable, (&=), cmdArgs, help, summary)
 import System.IO              ( BufferMode(..), hSetBuffering, stdout)
 import System.Locale          ( defaultTimeLocale)
-import System.Process         ( system)
+import System.Process         ( CreateProcess(..), StdStream(..), CmdSpec(..)
+                              , createProcess, system)
 import System.Time            ( formatCalendarTime, getClockTime
                               , toCalendarTime)
 import Text.Printf            ( printf)
@@ -36,23 +43,97 @@ timedLog :: String -> IO ()
 timedLog s = getClockTime >>= toCalendarTime >>= \t -> printf "%s: %s" (iso t) s
   where iso = formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
 
--- fetch an HTTP resource and read it
+fetchHTTP :: String -> IO ByteString
+fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
+                case mstdout of
+                  Just h  -> hGetContents h
+                  Nothing -> error "wget had no stdout handle???"
+  where wget = CreateProcess (ShellCommand $ printf "wget --no-check-certificate -q -O - \"%s\"" url)
+                             Nothing Nothing CreatePipe CreatePipe CreatePipe
+                             False False
+
 readHTTP :: Read a => String -> IO a
-readHTTP url = fmap read $ getResponseBody =<< simpleHTTP (getRequest url)
+readHTTP url = (read . map w2c . unpack) <$> fetchHTTP url
 
--- the primary stats read from various web sources
-newtype BTCPrice = BTCPrice Double
-newtype NetHashRate = NetHashRate Double
+data MtgoxTicker
+  = MtgoxTicker
+  { _status :: Text
+  , _result :: MtgoxResult
+  } deriving Show
 
-data Results = Results { btcPrice :: BTCPrice, netHashRate :: NetHashRate }
+data MtgoxResult
+  = MtgoxResult
+  { _high       :: MtgoxStats
+  , _low        :: MtgoxStats
+  , _avg        :: MtgoxStats
+  , _vwap       :: MtgoxStats
+  , _vol        :: MtgoxStats
+  , _last_local :: MtgoxStats
+  , _last_all   :: MtgoxStats
+  , _last       :: MtgoxStats
+  , _buy        :: MtgoxStats
+  , _sell       :: MtgoxStats
+  } deriving Show
 
-emptyResults :: Results
-emptyResults = Results (BTCPrice 0.0) (NetHashRate 0.0)
+data MtgoxStats
+  = MtgoxStats
+  { _value         :: Double
+  , _value_int     :: Integer
+  , _text          :: Text
+  , _text_short    :: Text
+  , _currency      :: Currency
+  } deriving Show
 
--- fetch the price of BTC
-fetchPriceOfBTC :: IO BTCPrice
-fetchPriceOfBTC = BTCPrice . (**(-1)) <$> readHTTP url
-  where url = "http://blockchain.info/tobtc?currency=USD&value=1"
+data Currency = USD | EUR | BTC deriving (Read, Show)
+
+makeLenses ''MtgoxTicker
+makeLenses ''MtgoxResult
+makeLenses ''MtgoxStats
+
+instance FromJSON MtgoxTicker where
+  parseJSON (Object v) = MtgoxTicker <$> v .: "result" <*> v .: "return"
+  parseJSON _          = mzero
+
+instance FromJSON MtgoxResult where
+  parseJSON (Object v) = MtgoxResult <$>
+                         v .: "high"       <*>
+                         v .: "low"        <*>
+                         v .: "avg"        <*>
+                         v .: "vwap"       <*>
+                         v .: "vol"        <*>
+                         v .: "last_local" <*>
+                         v .: "last_all"   <*>
+                         v .: "last"       <*>
+                         v .: "buy"        <*>
+                         v .: "sell"
+  parseJSON _ = mzero
+
+instance FromJSON MtgoxStats where
+  parseJSON (Object v) = MtgoxStats <$>
+                         (read <$> v .: "value")         <*>
+                         (read <$> v .: "value_int")     <*>
+                         v .: "display"       <*>
+                         v .: "display_short" <*>
+                         v .: "currency"
+  parseJSON _ = mzero
+
+instance FromJSON Currency where
+  parseJSON (String "USD") = pure USD
+  parseJSON (String "EUR") = pure EUR
+  parseJSON (String "BTC") = pure BTC
+  parseJSON _              = mzero
+
+newtype NetHashRate = NetHashRate Double deriving (Eq, Show)
+
+data Results = Results { ticker :: MtgoxTicker, netHashRate :: NetHashRate }
+
+fetchMtgoxTicker :: IO MtgoxTicker
+fetchMtgoxTicker = (decode <$> fetchHTTP url) >>= \mt ->
+                   case mt of
+                    (Just t) -> return t
+                    _        -> fail "failed to parse mtgox ticker"
+
+  where url = "https://mtgox.com/api/1/BTCUSD/ticker"
 
 -- fetch the network hash rate
 fetchNetHashRate :: IO NetHashRate
@@ -66,21 +147,24 @@ weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
 
 -- fetch and bundle the BTC price and network hash rate
 fetch :: IO Results
-fetch = timedLog "fetching\r" >> Results <$> fetchPriceOfBTC <*> fetchNetHashRate
+fetch = timedLog "fetching\r" >> Results <$> fetchMtgoxTicker <*> fetchNetHashRate
 
 -- display the fetched results
 display :: MVar Results -> Results -> IO ()
 display prev results = do
-  presults <- takeMVar prev
-  let (BTCPrice p)     = btcPrice results      -- get results
-  let (BTCPrice pp)    = btcPrice presults
+  mpresults <- tryTakeMVar prev
+  let p = (ticker results)^.result^.last_all^.value
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
   let wUSD             = wBTC * p              -- weekly USD equiv income
   timedLog $ (printf "$%.5f (%.5f/$%.5f weekly)\n" p wBTC wUSD :: String)
-  when (p /= pp) $ playSound $ if p >= pp
-    then "C:\\Windows\\Media\\tada.wav"
-    else "C:\\Windows\\Media\\chord.wav"
+  case mpresults of
+    (Just presults) -> do
+      let pp = (ticker presults)^.result^.last_all^.value
+      when (p /= pp) $ playSound $ if p >= pp
+        then "C:\\Windows\\Media\\tada.wav"
+        else "C:\\Windows\\Media\\chord.wav"
+    _ -> pure ()
   putMVar prev results
 
 -- repeat some action at a given interval
@@ -104,5 +188,5 @@ cmdCfg = Cfg { delay = 60000000 &= help "delay"}
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
-  where main' cfg = do presults <- newMVar emptyResults
+  where main' cfg = do presults <- newEmptyMVar
                        every (delay cfg) $ fetch >>= display presults
