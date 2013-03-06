@@ -10,25 +10,26 @@
 {-# OPTIONS_GHC -Wall -O2 -rtsopts #-}
 module Main where
 
-import Control.Applicative    ( (<$>), (<*>), pure)
-import Control.Concurrent     ( forkIO, threadDelay
-                              , MVar, newEmptyMVar, putMVar, tryTakeMVar)
-import Control.Exception      ( IOException, catch)
-import Control.Lens           ( (^.), makeLenses)
-import Control.Monad          ( forever, mzero, void, when)
-import Data.Aeson
+import Control.Applicative      ( (<$>), (<*>), pure)
+import Control.Concurrent       ( forkIO, threadDelay
+                                , MVar, newEmptyMVar, putMVar, tryTakeMVar)
+import Control.Conditional      ( (?), (??))
+import Control.Exception        ( IOException, catch)
+import Control.Lens             ( (^.), makeLenses)
+import Control.Monad            ( forever, mzero, void, when)
+import Data.Aeson               ( FromJSON(..), Value(..), (.:), decode)
 import Data.ByteString.Internal (w2c)
-import Data.ByteString.Lazy   ( ByteString, hGetContents, unpack)
-import Data.Text              ( Text)
-import Prelude hiding         ( catch)
-import System.Console.CmdArgs ( Data, Typeable, (&=), cmdArgs, help, summary)
-import System.IO              ( BufferMode(..), hSetBuffering, stdout)
-import System.Locale          ( defaultTimeLocale)
-import System.Process         ( CreateProcess(..), StdStream(..), CmdSpec(..)
-                              , createProcess, system)
-import System.Time            ( formatCalendarTime, getClockTime
-                              , toCalendarTime)
-import Text.Printf            ( printf)
+import Data.ByteString.Lazy     ( ByteString, hGetContents, unpack)
+import Data.Text                ( Text)
+import Prelude hiding           ( catch)
+import System.Console.CmdArgs   ( Data, Typeable, (&=), cmdArgs, help, summary)
+import System.IO                ( BufferMode(..), hSetBuffering, stdout)
+import System.Locale            ( defaultTimeLocale)
+import System.Process           ( CreateProcess(..), StdStream(..), CmdSpec(..)
+                                , createProcess, system)
+import System.Time              ( formatCalendarTime, getClockTime
+                                , toCalendarTime)
+import Text.Printf              ( printf)
 
 --------------------------------------------------------------------------------
 -- Configuration
@@ -74,11 +75,12 @@ fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
 
 -- fetch an HTTP object an attempt to read it
 readHTTP :: Read a => String -> IO a
-readHTTP url = (read . map w2c . unpack) <$> fetchHTTP url
+readHTTP = fmap (read . map w2c . unpack) . fetchHTTP
 
 -- use powershell to play a sound file
 playSound :: String -> IO ()
-playSound path = void $ forkIO $ void $ system $ printf fmt path
+
+playSound = void . forkIO . void . system . printf fmt
   where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
 
 --------------------------------------------------------------------------------
@@ -217,9 +219,7 @@ display prev cfg results = do
       let changed    = curprice /= prevprice
       let outside    = curprice < lastbuy || curprice > lastsell
       when (playSounds cfg && changed && outside) $
-        playSound $ if curprice >= prevprice
-                      then "C:\\Windows\\Media\\tada.wav"
-                      else "C:\\Windows\\Media\\chord.wav"
+        playSound $ curprice >= prevprice ? upSound ?? downSound
     _ -> pure ()
   putMVar prev results
 
