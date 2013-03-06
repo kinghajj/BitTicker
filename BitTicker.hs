@@ -44,7 +44,7 @@ myRate = 30e9
 
 -- the sounds to play on significant price changes
 upSound, downSound :: String
-upSound = "C:\\Windows\\Media\\tada.wav"
+upSound   = "C:\\Windows\\Media\\tada.wav"
 downSound = "C:\\Windows\\Media\\chord.wav"
 
 --------------------------------------------------------------------------------
@@ -79,7 +79,6 @@ readHTTP = fmap (read . map w2c . unpack) . fetchHTTP
 
 -- use powershell to play a sound file
 playSound :: String -> IO ()
-
 playSound = void . forkIO . void . system . printf fmt
   where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
 
@@ -128,7 +127,7 @@ instance FromJSON MtgoxTicker where
   parseJSON _          = mzero
 
 instance FromJSON MtgoxResult where
-  parseJSON (Object v) = MtgoxResult <$>
+  parseJSON (Object v) = MtgoxResult       <$>
                          v .: "high"       <*>
                          v .: "low"        <*>
                          v .: "avg"        <*>
@@ -142,11 +141,11 @@ instance FromJSON MtgoxResult where
   parseJSON _ = mzero
 
 instance FromJSON MtgoxStats where
-  parseJSON (Object v) = MtgoxStats <$>
-                         (read <$> v .: "value")         <*>
-                         (read <$> v .: "value_int")     <*>
-                         v .: "display"       <*>
-                         v .: "display_short" <*>
+  parseJSON (Object v) = MtgoxStats                  <$>
+                         (read <$> v .: "value")     <*>
+                         (read <$> v .: "value_int") <*>
+                         v .: "display"              <*>
+                         v .: "display_short"        <*>
                          v .: "currency"
   parseJSON _ = mzero
 
@@ -228,8 +227,8 @@ data Cfg = Cfg { delay :: Int, playSounds :: Bool}
          deriving (Show, Data, Typeable)
 
 cmdCfg :: Cfg
-cmdCfg = Cfg { delay = 10000000  &= help "delay"
-             , playSounds = True &= help "play sounds"}
+cmdCfg = Cfg { delay = 15000000   &= help "delay"
+             , playSounds = False &= help "play sounds"}
          &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
