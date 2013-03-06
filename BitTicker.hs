@@ -150,7 +150,7 @@ fetch :: IO Results
 fetch = timedLog "fetching\r" >> Results <$> fetchMtgoxTicker <*> fetchNetHashRate
 
 -- display the fetched results
-display :: MVar Results -> Results -> IO ()
+display :: MVar (Results, Double, Double) -> Results -> IO ()
 display prev results = do
   mpresults <- tryTakeMVar prev
   let curticker        = (ticker results)^.result
@@ -161,20 +161,24 @@ display prev results = do
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
   let wUSD             = wBTC * curprice       -- weekly USD equiv income
-  timedLog $ (printf "$%.5f [$%.5f-$%.5f] (%.5f/$%.5f)\n"
+  timedLog $ (printf "$%.2f $%.2f-$%.2f (%.2f/$%.2f)"
                      curprice curbuy cursell wBTC wUSD :: String)
   case mpresults of
-    (Just presults) -> do
+    (Just (presults, lowp, highp)) -> do
       let prevticker = (ticker presults)^.result
       let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
+      let high'      = max curprice highp
+      let low'       = min curprice lowp
+      putStr $ printf " L$%.2f H$%.2f" low' high'
       when (curprice /= prevprice && (curprice < lastbuy || curprice > lastsell)) $
         playSound $ if curprice >= prevprice
                       then "C:\\Windows\\Media\\tada.wav"
                       else "C:\\Windows\\Media\\chord.wav"
-    _ -> pure ()
-  putMVar prev results
+      putMVar prev (results, low', high')
+    _ -> putMVar prev (results, curprice, curprice)
+  putChar '\n'
 
 -- repeat some action at a given interval
 every :: Int -> IO () -> IO ()
