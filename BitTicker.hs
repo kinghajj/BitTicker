@@ -153,17 +153,26 @@ fetch = timedLog "fetching\r" >> Results <$> fetchMtgoxTicker <*> fetchNetHashRa
 display :: MVar Results -> Results -> IO ()
 display prev results = do
   mpresults <- tryTakeMVar prev
-  let p = (ticker results)^.result^.last_all^.value
+  let curticker        = (ticker results)^.result
+  let curlast_all      = curticker^.last_all
+  let curprice         = curlast_all^.value
+  let curbuy           = curticker^.buy^.value
+  let cursell          = curticker^.sell^.value
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
-  let wUSD             = wBTC * p              -- weekly USD equiv income
-  timedLog $ (printf "$%.5f (%.5f/$%.5f weekly)\n" p wBTC wUSD :: String)
+  let wUSD             = wBTC * curprice       -- weekly USD equiv income
+  timedLog $ (printf "$%.5f [$%.5f-$%.5f] (%.5f/$%.5f)\n"
+                     curprice curbuy cursell wBTC wUSD :: String)
   case mpresults of
     (Just presults) -> do
-      let pp = (ticker presults)^.result^.last_all^.value
-      when (p /= pp) $ playSound $ if p >= pp
-        then "C:\\Windows\\Media\\tada.wav"
-        else "C:\\Windows\\Media\\chord.wav"
+      let prevticker = (ticker presults)^.result
+      let prevprice  = prevticker^.last_all^.value
+      let lastbuy    = prevticker^.buy^.value
+      let lastsell   = prevticker^.sell^.value
+      when (curprice /= prevprice && (curprice < lastbuy || curprice > lastsell)) $
+        playSound $ if curprice >= prevprice
+                      then "C:\\Windows\\Media\\tada.wav"
+                      else "C:\\Windows\\Media\\chord.wav"
     _ -> pure ()
   putMVar prev results
 
@@ -183,7 +192,7 @@ playSound path = void $ forkIO $ void $ system $ printf fmt path
 data Cfg = Cfg { delay :: Int } deriving (Show, Data, Typeable)
 
 cmdCfg :: Cfg
-cmdCfg = Cfg { delay = 60000000 &= help "delay"}
+cmdCfg = Cfg { delay = 10000000 &= help "delay"}
          &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
