@@ -20,6 +20,7 @@ import Control.Monad            ( forever, mzero, void, when)
 import Data.Aeson               ( FromJSON(..), Value(..), (.:), decode)
 import Data.ByteString.Internal (w2c)
 import Data.ByteString.Lazy     ( ByteString, hGetContents, unpack)
+import Data.Maybe               ( fromJust)
 import Data.Text                ( Text)
 import Prelude hiding           ( catch)
 import System.Console.CmdArgs   ( Data, Typeable, (&=), cmdArgs, help, summary)
@@ -88,12 +89,12 @@ playSound = void . forkIO . void . system . printf fmt
 -- data structures for the MtGox HTTP API v1
 data MtgoxTicker
   = MtgoxTicker
-  { _status :: Text
-  , _result :: MtgoxResult
+  { _tickerstatus :: Text
+  , _tickerresult :: MtgoxTickerResult
   } deriving Show
 
-data MtgoxResult
-  = MtgoxResult
+data MtgoxTickerResult
+  = MtgoxTickerResult
   { _high       :: MtgoxStats
   , _low        :: MtgoxStats
   , _avg        :: MtgoxStats
@@ -117,17 +118,32 @@ data MtgoxStats
 
 data Currency = USD | EUR | BTC deriving (Read, Show)
 
+data MtgoxLag
+  = MtgoxLag
+  { _lagstatus :: Text
+  , _lagresult :: MtgoxLagResult
+  } deriving Show
+
+data MtgoxLagResult
+  = MtgoxLagResult
+  { _lag      :: Integer
+  , _lag_secs :: Double
+  , _lag_text :: Text
+  } deriving Show
+
 makeLenses ''MtgoxTicker
-makeLenses ''MtgoxResult
+makeLenses ''MtgoxTickerResult
 makeLenses ''MtgoxStats
+makeLenses ''MtgoxLag
+makeLenses ''MtgoxLagResult
 
 -- instances to convert JSON object
 instance FromJSON MtgoxTicker where
   parseJSON (Object v) = MtgoxTicker <$> v .: "result" <*> v .: "return"
   parseJSON _          = mzero
 
-instance FromJSON MtgoxResult where
-  parseJSON (Object v) = MtgoxResult       <$>
+instance FromJSON MtgoxTickerResult where
+  parseJSON (Object v) = MtgoxTickerResult <$>
                          v .: "high"       <*>
                          v .: "low"        <*>
                          v .: "avg"        <*>
@@ -155,22 +171,38 @@ instance FromJSON Currency where
   parseJSON (String "BTC") = pure BTC
   parseJSON _              = mzero
 
+instance FromJSON MtgoxLag where
+  parseJSON (Object v) = MtgoxLag <$> v .: "result" <*> v .: "return"
+  parseJSON _          = mzero
+
+instance FromJSON MtgoxLagResult where
+  parseJSON (Object v) = MtgoxLagResult  <$>
+                         v .: "lag"      <*>
+                         v .: "lag_secs" <*>
+                         v .: "lag_text"
+  parseJSON _ = mzero
+
 newtype NetHashRate = NetHashRate Double deriving (Eq, Show)
 
 -- the core results stored by the program
-data Results = Results { ticker :: MtgoxTicker, netHashRate :: NetHashRate }
+data Results
+  = Results
+  { ticker      :: MtgoxTicker
+  , lagger      :: MtgoxLag
+  , netHashRate :: NetHashRate
+  }
 
 --------------------------------------------------------------------------------
 -- Ticker info fetching
 
+fetchDecode :: FromJSON a => String -> IO a
+fetchDecode = fmap fromJust . fmap decode . fetchHTTP
+
 fetchMtgoxTicker :: IO MtgoxTicker
-fetchMtgoxTicker = (decode <$> fetchHTTP url) >>= \mt ->
-                   case mt of
-                    (Just t) -> return t
-                    _        -> fail "failed to parse mtgox ticker"
+fetchMtgoxTicker = fetchDecode "https://mtgox.com/api/1/BTCUSD/ticker"
 
-  where url = "https://mtgox.com/api/1/BTCUSD/ticker"
-
+fetchMtgoxLag :: IO MtgoxLag
+fetchMtgoxLag = fetchDecode "https://mtgox.com/api/1/generic/order/lag"
 
 -- fetch the network hash rate
 fetchNetHashRate :: IO NetHashRate
@@ -191,13 +223,15 @@ weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
 -- fetch and bundle the BTC price and network hash rate
 fetch :: IO Results
 fetch = timedLog "fetching\r" >>
-        Results <$> fetchMtgoxTicker <*> fetchNetHashRate
+        Results <$> fetchMtgoxTicker <*> fetchMtgoxLag <*> fetchNetHashRate
 
 -- display the fetched results
 display :: MVar Results -> Cfg -> Results -> IO ()
 display prev cfg results = do
   mpresults <- tryTakeMVar prev
-  let curticker        = (ticker results)^.result
+  let curticker        = (ticker results)^.tickerresult
+  let curlagger        = (lagger results)^.lagresult
+  let curlag           = curlagger^.lag_secs
   let curlast_all      = curticker^.last_local
   let curprice         = curlast_all^.value
   let curbuy           = curticker^.buy^.value
@@ -206,12 +240,12 @@ display prev cfg results = do
   let curlow           = curticker^.low^.value
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
-  let wUSD             = wBTC * curprice       -- weekly USD equiv income
-  timedLog $ (printf "$%.2f $%.2f-$%.2f (%.2f/$%.2f) L$%.2f H$%.2f\n"
-                     curprice curbuy cursell wBTC wUSD curlow curhigh :: String)
+  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2fs %.2f\n"
+                     curprice curbuy cursell curlow
+                     curhigh curlag wBTC :: String)
   case mpresults of
     (Just presults) -> do
-      let prevticker = (ticker presults)^.result
+      let prevticker = (ticker presults)^.tickerresult
       let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
