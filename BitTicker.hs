@@ -10,7 +10,7 @@
 {-# OPTIONS_GHC -Wall -O2 -rtsopts #-}
 module Main where
 
-import Control.Applicative      ( (<$>), (<*>), pure)
+import Control.Applicative      ( (<$>), (<*>), pure, liftA2, liftA3)
 import Control.Concurrent       ( forkIO, threadDelay
                                 , MVar, newEmptyMVar, putMVar, tryTakeMVar)
 import Control.Conditional      ( (?), (??))
@@ -75,8 +75,8 @@ fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
                              False False
 
 -- fetch an HTTP object an attempt to read it
-readHTTP :: Read a => String -> IO a
-readHTTP = fmap (read . map w2c . unpack) . fetchHTTP
+fetchRead :: Read a => String -> IO a
+fetchRead = fmap (read . map w2c . unpack) . fetchHTTP
 
 -- use powershell to play a sound file
 playSound :: String -> IO ()
@@ -86,27 +86,25 @@ playSound = void . forkIO . void . system . printf fmt
 --------------------------------------------------------------------------------
 -- Ticker data structures
 
--- data structures for the MtGox HTTP API v1
+-- all Mtgox JSON responses have a status and a result
+data MtgoxResponse r =
+  MtgoxResponse { _status :: Text, _result :: r } deriving Show
+
+-- one kind of response is the ticker
 data MtgoxTicker
   = MtgoxTicker
-  { _tickerstatus :: Text
-  , _tickerresult :: MtgoxTickerResult
-  } deriving Show
-
-data MtgoxTickerResult
-  = MtgoxTickerResult
   { _high       :: MtgoxStats
   , _low        :: MtgoxStats
   , _avg        :: MtgoxStats
   , _vwap       :: MtgoxStats
   , _vol        :: MtgoxStats
   , _last_local :: MtgoxStats
-  , _last_all   :: MtgoxStats
   , _last       :: MtgoxStats
   , _buy        :: MtgoxStats
   , _sell       :: MtgoxStats
   } deriving Show
 
+-- each ticker entry has these data
 data MtgoxStats
   = MtgoxStats
   { _value         :: Double
@@ -116,53 +114,44 @@ data MtgoxStats
   , _currency      :: Currency
   } deriving Show
 
+-- the three currencies we're concerned with
 data Currency = USD | EUR | BTC deriving (Read, Show)
 
+-- another response is the lag counter
 data MtgoxLag
   = MtgoxLag
-  { _lagstatus :: Text
-  , _lagresult :: MtgoxLagResult
-  } deriving Show
-
-data MtgoxLagResult
-  = MtgoxLagResult
   { _lag      :: Integer
   , _lag_secs :: Double
   , _lag_text :: Text
   } deriving Show
 
+-- make convenient lenses for these data structures
+makeLenses ''MtgoxResponse
 makeLenses ''MtgoxTicker
-makeLenses ''MtgoxTickerResult
 makeLenses ''MtgoxStats
 makeLenses ''MtgoxLag
-makeLenses ''MtgoxLagResult
 
--- instances to convert JSON object
-instance FromJSON MtgoxTicker where
-  parseJSON (Object v) = MtgoxTicker <$> v .: "result" <*> v .: "return"
+-- implement JSON decoding instances for these data structures
+
+instance FromJSON r => FromJSON (MtgoxResponse r) where
+  parseJSON (Object v) = MtgoxResponse <$> v .: "result" <*> v .: "return"
   parseJSON _          = mzero
 
-instance FromJSON MtgoxTickerResult where
-  parseJSON (Object v) = MtgoxTickerResult <$>
-                         v .: "high"       <*>
-                         v .: "low"        <*>
-                         v .: "avg"        <*>
-                         v .: "vwap"       <*>
-                         v .: "vol"        <*>
-                         v .: "last_local" <*>
-                         v .: "last_all"   <*>
-                         v .: "last"       <*>
-                         v .: "buy"        <*>
-                         v .: "sell"
+instance FromJSON MtgoxTicker where
+  parseJSON (Object v) =
+    MtgoxTicker <$> v .: "high" <*> v .: "low" <*> v .: "avg" <*>
+                    v .: "vwap" <*> v .: "vol" <*>
+                    v .: "last_local" <*> v .: "last" <*>
+                    v .: "buy" <*> v .: "sell"
   parseJSON _ = mzero
 
 instance FromJSON MtgoxStats where
-  parseJSON (Object v) = MtgoxStats                  <$>
-                         (read <$> v .: "value")     <*>
-                         (read <$> v .: "value_int") <*>
-                         v .: "display"              <*>
-                         v .: "display_short"        <*>
-                         v .: "currency"
+  parseJSON (Object v) =
+    MtgoxStats <$> (read <$> v .: "value") <*>
+                   (read <$> v .: "value_int") <*>
+                   v .: "display"       <*>
+                   v .: "display_short" <*>
+                   v .: "currency"
   parseJSON _ = mzero
 
 instance FromJSON Currency where
@@ -172,43 +161,38 @@ instance FromJSON Currency where
   parseJSON _              = mzero
 
 instance FromJSON MtgoxLag where
-  parseJSON (Object v) = MtgoxLag <$> v .: "result" <*> v .: "return"
-  parseJSON _          = mzero
-
-instance FromJSON MtgoxLagResult where
-  parseJSON (Object v) = MtgoxLagResult  <$>
-                         v .: "lag"      <*>
-                         v .: "lag_secs" <*>
-                         v .: "lag_text"
+  parseJSON (Object v) =
+    MtgoxLag <$> v .: "lag" <*> v .: "lag_secs" <*> v .: "lag_text"
   parseJSON _ = mzero
 
+-- We also sample the network hash rate from another source
 newtype NetHashRate = NetHashRate Double deriving (Eq, Show)
 
--- the core results stored by the program
-data Results
-  = Results
-  { ticker      :: MtgoxTicker
-  , lagger      :: MtgoxLag
+-- the core sample stored by the program
+data Sample
+  = Sample
+  { ticker      :: MtgoxResponse MtgoxTicker
+  , lagger      :: MtgoxResponse MtgoxLag
   , netHashRate :: NetHashRate
   }
 
 --------------------------------------------------------------------------------
--- Ticker info fetching
+-- Info fetching
 
 fetchDecode :: FromJSON a => String -> IO a
-fetchDecode = fmap fromJust . fmap decode . fetchHTTP
+fetchDecode = fmap (fromJust . decode) . fetchHTTP
 
-fetchMtgoxTicker :: IO MtgoxTicker
+fetchMtgoxTicker :: IO (MtgoxResponse MtgoxTicker)
 fetchMtgoxTicker = fetchDecode "https://mtgox.com/api/1/BTCUSD/ticker"
 
-fetchMtgoxLag :: IO MtgoxLag
+fetchMtgoxLag :: IO (MtgoxResponse MtgoxLag)
 fetchMtgoxLag = fetchDecode "https://mtgox.com/api/1/generic/order/lag"
 
 -- fetch the network hash rate
 fetchNetHashRate :: IO NetHashRate
-fetchNetHashRate = fmap NetHashRate $
-                   (/) <$> readHTTP "http://blockexplorer.com/q/hashestowin"
-                       <*> readHTTP "http://blockexplorer.com/q/interval/144"
+fetchNetHashRate = fmap NetHashRate $ liftA2 (/) url1 url2
+  where url1 = fetchRead "http://blockexplorer.com/q/hashestowin"
+        url2 = fetchRead "http://blockexplorer.com/q/interval/144"
 
 --------------------------------------------------------------------------------
 -- Addition info calculations
@@ -221,16 +205,16 @@ weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
 -- Main program
 
 -- fetch and bundle the BTC price and network hash rate
-fetch :: IO Results
+fetch :: IO Sample
 fetch = timedLog "fetching\r" >>
-        Results <$> fetchMtgoxTicker <*> fetchMtgoxLag <*> fetchNetHashRate
+        liftA3 Sample fetchMtgoxTicker fetchMtgoxLag fetchNetHashRate
 
--- display the fetched results
-display :: MVar Results -> Cfg -> Results -> IO ()
-display prev cfg results = do
-  mpresults <- tryTakeMVar prev
-  let curticker        = (ticker results)^.tickerresult
-  let curlagger        = (lagger results)^.lagresult
+-- display the fetched Sample
+display :: MVar Sample -> Cfg -> Sample -> IO ()
+display prevsample cfg sample = do
+  -- extract/calculate data to display
+  let curticker        = (ticker sample)^.result
+  let curlagger        = (lagger sample)^.result
   let curlag           = curlagger^.lag_secs
   let curlast_all      = curticker^.last_local
   let curprice         = curlast_all^.value
@@ -238,23 +222,28 @@ display prev cfg results = do
   let cursell          = curticker^.sell^.value
   let curhigh          = curticker^.high^.value
   let curlow           = curticker^.low^.value
-  let (NetHashRate hr) = netHashRate results   -- then calc new ones
+  let (NetHashRate hr) = netHashRate sample    -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
+  -- display it!
   timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2f %.2fs\n"
                      curprice curbuy cursell curlow
                      curhigh wBTC curlag :: String)
-  case mpresults of
-    (Just presults) -> do
-      let prevticker = (ticker presults)^.tickerresult
+  -- if there was a previous sample, maybe play a sound
+  mpsample <- tryTakeMVar prevsample
+  case mpsample of
+    (Just psample) -> do
+      let prevticker = (ticker psample)^.result
       let prevprice  = prevticker^.last_local^.value
       let lastbuy    = prevticker^.buy^.value
       let lastsell   = prevticker^.sell^.value
       let changed    = curprice /= prevprice
       let outside    = curprice < lastbuy || curprice > lastsell
+      -- if price changed and outside previous sample's spread, play sound
       when (playSounds cfg && changed && outside) $
         playSound $ curprice >= prevprice ? upSound ?? downSound
     _ -> pure ()
-  putMVar prev results
+  -- remember this sample for next time
+  putMVar prevsample sample
 
 -- command line options
 data Cfg = Cfg { delay :: Int, playSounds :: Bool}
@@ -267,5 +256,5 @@ cmdCfg = Cfg { delay = 15000000   &= help "delay"
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
-  where main' cfg = do presults <- newEmptyMVar
-                       every (delay cfg) $ fetch >>= display presults cfg
+  where main' cfg = do psample <- newEmptyMVar
+                       every (delay cfg) $ fetch >>= display psample cfg
