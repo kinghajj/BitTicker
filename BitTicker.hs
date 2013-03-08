@@ -240,9 +240,9 @@ display prev cfg results = do
   let curlow           = curticker^.low^.value
   let (NetHashRate hr) = netHashRate results   -- then calc new ones
   let wBTC             = weeklyMiningIncome hr -- weekly BTC income
-  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2fs %.2f\n"
+  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2f %.2fs\n"
                      curprice curbuy cursell curlow
-                     curhigh curlag wBTC :: String)
+                     curhigh wBTC curlag :: String)
   case mpresults of
     (Just presults) -> do
       let prevticker = (ticker presults)^.tickerresult
