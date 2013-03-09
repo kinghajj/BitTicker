@@ -10,7 +10,7 @@
 {-# OPTIONS_GHC -Wall -O2 -rtsopts #-}
 module Main where
 
-import Control.Applicative      ( (<$>), (<*>), pure, liftA2, liftA3)
+import Control.Applicative      ( (<$>), (<*>), pure, liftA2)
 import Control.Concurrent       ( forkIO, threadDelay
                                 , MVar, newEmptyMVar, putMVar, tryTakeMVar)
 import Control.Conditional      ( (?), (??))
@@ -34,14 +34,6 @@ import Text.Printf              ( printf)
 
 --------------------------------------------------------------------------------
 -- Configuration
-
--- number of BTC allocated per second, assuming 25 BTC per 10 minutes
-btcPerSec :: Double
-btcPerSec = 0.04167
-
--- the hashes per second of a hypothetical mining rig
-myRate :: Double
-myRate = 30e9
 
 -- the sounds to play on significant price changes
 upSound, downSound :: String
@@ -149,7 +141,7 @@ instance FromJSON MtgoxStats where
   parseJSON (Object v) =
     MtgoxStats <$> (read <$> v .: "value") <*>
                    (read <$> v .: "value_int") <*>
-                   v .: "display"       <*>
+                   v .: "display" <*>
                    v .: "display_short" <*>
                    v .: "currency"
   parseJSON _ = mzero
@@ -173,7 +165,6 @@ data Sample
   = Sample
   { ticker      :: MtgoxResponse MtgoxTicker
   , lagger      :: MtgoxResponse MtgoxLag
-  , netHashRate :: NetHashRate
   }
 
 --------------------------------------------------------------------------------
@@ -188,26 +179,13 @@ fetchMtgoxTicker = fetchDecode "https://mtgox.com/api/1/BTCUSD/ticker"
 fetchMtgoxLag :: IO (MtgoxResponse MtgoxLag)
 fetchMtgoxLag = fetchDecode "https://mtgox.com/api/1/generic/order/lag"
 
--- fetch the network hash rate
-fetchNetHashRate :: IO NetHashRate
-fetchNetHashRate = fmap NetHashRate $ liftA2 (/) url1 url2
-  where url1 = fetchRead "http://blockexplorer.com/q/hashestowin"
-        url2 = fetchRead "http://blockexplorer.com/q/interval/144"
-
---------------------------------------------------------------------------------
--- Addition info calculations
-
--- compute weekly mining income given a current network rate
-weeklyMiningIncome :: Double -> Double
-weeklyMiningIncome hr = (myRate/(hr+myRate)) * btcPerSec * 60 * 60 * 24 * 7
-
 --------------------------------------------------------------------------------
 -- Main program
 
 -- fetch and bundle the BTC price and network hash rate
 fetch :: IO Sample
 fetch = timedLog "fetching\r" >>
-        liftA3 Sample fetchMtgoxTicker fetchMtgoxLag fetchNetHashRate
+        liftA2 Sample fetchMtgoxTicker fetchMtgoxLag
 
 -- display the fetched Sample
 display :: MVar Sample -> Cfg -> Sample -> IO ()
@@ -222,12 +200,10 @@ display prevsample cfg sample = do
   let cursell          = curticker^.sell^.value
   let curhigh          = curticker^.high^.value
   let curlow           = curticker^.low^.value
-  let (NetHashRate hr) = netHashRate sample    -- then calc new ones
-  let wBTC             = weeklyMiningIncome hr -- weekly BTC income
   -- display it!
-  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2f %.2fs\n"
+  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %.2fs\n"
                      curprice curbuy cursell curlow
-                     curhigh wBTC curlag :: String)
+                     curhigh curlag :: String)
   -- if there was a previous sample, maybe play a sound
   mpsample <- tryTakeMVar prevsample
   case mpsample of
@@ -250,9 +226,12 @@ data Cfg = Cfg { delay :: Int, playSounds :: Bool}
          deriving (Show, Data, Typeable)
 
 cmdCfg :: Cfg
-cmdCfg = Cfg { delay = 15000000   &= help "delay"
-             , playSounds = False &= help "play sounds"}
-         &= summary "Personal Bitcoin Ticker"
+cmdCfg =
+  Cfg
+  { delay = 15000000   &= help "sample delay in microseconds"
+  , playSounds = False &= help "play sounds?"
+  }
+  &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
