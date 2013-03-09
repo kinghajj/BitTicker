@@ -13,6 +13,7 @@ module Main where
 import Control.Applicative      ( (<$>), (<*>), pure, liftA2)
 import Control.Concurrent       ( forkIO, threadDelay
                                 , MVar, newEmptyMVar, putMVar, tryTakeMVar)
+import Control.Concurrent       ( runInUnboundThread)
 import Control.Conditional      ( (?), (??))
 import Control.Exception        ( IOException, catch)
 import Control.Lens             ( (^.), makeLenses)
@@ -171,7 +172,7 @@ data Sample
 -- Info fetching
 
 fetchDecode :: FromJSON a => String -> IO a
-fetchDecode = fmap (fromJust . decode) . fetchHTTP
+fetchDecode = runInUnboundThread . fmap (fromJust . decode) . fetchHTTP
 
 fetchMtgoxTicker :: IO (MtgoxResponse MtgoxTicker)
 fetchMtgoxTicker = fetchDecode "https://mtgox.com/api/1/BTCUSD/ticker"
