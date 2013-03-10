@@ -15,10 +15,9 @@ import Control.Applicative      ( (<$>), (<*>), pure)
 import Control.Concurrent       ( forkIO, threadDelay
                                 , MVar, newEmptyMVar, putMVar, tryTakeMVar)
 import Control.Concurrent       ( runInUnboundThread)
-import Control.Conditional      ( (?), (??))
 import Control.Exception        ( IOException, catch)
 import Control.Lens             ( (^.), makeLenses)
-import Control.Monad            ( forever, mzero, void, when)
+import Control.Monad            ( forever, mzero, void)
 import Data.Aeson               ( FromJSON(..), Value(..), (.:), decode)
 import Data.ByteString.Internal (w2c)
 import Data.ByteString.Lazy     ( ByteString, hGetContents, unpack)
@@ -31,18 +30,10 @@ import System.Console.CmdArgs   ( Data, Typeable, (&=), cmdArgs, help, summary)
 import System.IO                ( BufferMode(..), hSetBuffering, stdout)
 import System.Locale            ( defaultTimeLocale)
 import System.Process           ( CreateProcess(..), StdStream(..), CmdSpec(..)
-                                , createProcess, system)
+                                , createProcess)
 import System.Time              ( formatCalendarTime, getClockTime
                                 , toCalendarTime)
 import Text.Printf              ( printf)
-
---------------------------------------------------------------------------------
--- Configuration
-
--- the sounds to play on significant price changes
-upSound, downSound :: String
-upSound   = "C:\\Windows\\Media\\tada.wav"
-downSound = "C:\\Windows\\Media\\chord.wav"
 
 --------------------------------------------------------------------------------
 -- Utility functions
@@ -74,15 +65,6 @@ fetchHTTP url = createProcess wget >>= \(_, mstdout, _, _) ->
 fetchRead :: Read a => String -> IO a
 fetchRead = fmap (read . map w2c . unpack) . fetchHTTP
 
--- use powershell to play a sound file
-playSound :: String -> IO ()
-#ifdef mingw32_HOST_OS
-playSound = void . forkIO . void . system . printf fmt
-  where fmt = "powershell -c (New-Object Media.SoundPlayer \"%s\").PlaySync();"
-#else
-playSound _ = pure ()
-#endif
-
 readMicroPosix :: String -> UTCTime
 readMicroPosix pt =
   posixSecondsToUTCTime $ fromInteger $ read pt `div` 1000000
@@ -92,7 +74,7 @@ readMicroPosix pt =
 
 -- all Mtgox JSON responses have a status and a result
 data MtgoxResponse r =
-  MtgoxResponse { _status :: Text, _result :: r } deriving Show
+  MtgoxResponse { _status :: Text, _result :: r } deriving (Eq, Show)
 
 -- one kind of response is the ticker
 data MtgoxTicker
@@ -107,7 +89,7 @@ data MtgoxTicker
   , _buy        :: MtgoxStats
   , _sell       :: MtgoxStats
   , _now        :: UTCTime
-  } deriving Show
+  } deriving (Eq, Show)
 
 -- each ticker entry has these data
 data MtgoxStats
@@ -117,10 +99,10 @@ data MtgoxStats
   , _text          :: Text
   , _text_short    :: Text
   , _currency      :: Currency
-  } deriving Show
+  } deriving (Eq, Show)
 
 -- the three currencies we're concerned with
-data Currency = USD | EUR | BTC deriving (Read, Show)
+data Currency = USD | EUR | BTC deriving (Eq, Read, Show)
 
 -- make convenient lenses for these data structures
 makeLenses ''MtgoxResponse
@@ -167,14 +149,15 @@ fetchDecode :: FromJSON a => String -> IO a
 fetchDecode = runInUnboundThread . fmap (fromJust . decode) . fetchHTTP
 
 fetchMtgoxTicker :: IO Sample
-fetchMtgoxTicker = fetchDecode "https://data.mtgox.com/api/2/BTCUSD/money/ticker"
+fetchMtgoxTicker = fetchDecode tickerURL
+  where tickerURL = "https://data.mtgox.com/api/2/BTCUSD/money/ticker"
 
 --------------------------------------------------------------------------------
 -- Main program
 
 -- display the fetched Sample
-display :: MVar Sample -> Cfg -> Sample -> IO ()
-display prevsample cfg sample = do
+display :: MVar Sample -> Sample -> IO ()
+display prevsample sample = do
   -- extract/calculate data to display
   curtime <- posixSecondsToUTCTime  <$> getPOSIXTime
   let curticker        = sample^.result
@@ -185,43 +168,30 @@ display prevsample cfg sample = do
   let curhigh          = curticker^.high^.value
   let curlow           = curticker^.low^.value
   let curlag           = show $ diffUTCTime curtime (curticker^.now)
-  --let curlag = 0.0 :: Double
-  -- display it!
-  timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %s\n"
-                     curprice curbuy cursell curlow
-                     curhigh curlag :: String)
-  -- if there was a previous sample, maybe play a sound
-  mpsample <- tryTakeMVar prevsample
-  case mpsample of
-    (Just psample) -> do
-      let prevticker = psample^.result
-      let prevprice  = prevticker^.last_local^.value
-      let lastbuy    = prevticker^.buy^.value
-      let lastsell   = prevticker^.sell^.value
-      let changed    = curprice /= prevprice
-      let outside    = curprice < lastbuy || curprice > lastsell
-      -- if price changed and outside previous sample's spread, play sound
-      when (playSounds cfg && changed && outside) $
-        playSound $ curprice >= prevprice ? upSound ?? downSound
-    _ -> pure ()
-  -- remember this sample for next time
+  -- display it, but only if it's different from previous sample
+  shouldLog <- maybe True (\ps -> ps^.result^.now /= curticker^.now) <$>
+                 tryTakeMVar prevsample
+  if shouldLog
+    then timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %s\n"
+                            curprice curbuy cursell curlow
+                            curhigh curlag :: String)
+    else timedLog "repeat...\n"
   putMVar prevsample sample
 
 -- command line options
-data Cfg = Cfg { delay :: Int, playSounds :: Bool}
+data Cfg = Cfg { delay :: Int }
          deriving (Show, Data, Typeable)
 
 cmdCfg :: Cfg
 cmdCfg =
   Cfg
   { delay = 15000000   &= help "sample delay in microseconds"
-  , playSounds = False &= help "play sounds?"
   }
   &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
 main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
-  where main' cfg = do psample <- newEmptyMVar
-                       every (delay cfg) $ timedLog "fetching\r" >>
-                                           fetchMtgoxTicker >>=
-                                           display psample cfg
+  where main' cfg = do
+          psample <- newEmptyMVar
+          every (delay cfg) $
+            timedLog "fetching\r" >> fetchMtgoxTicker >>= display psample
