@@ -12,28 +12,35 @@
 module Main where
 
 import Control.Applicative      ( (<$>), (<*>), pure)
-import Control.Concurrent       ( forkIO, threadDelay
-                                , MVar, newEmptyMVar, putMVar, tryTakeMVar)
+import Control.Concurrent       ( forkIO, threadDelay, MVar, newEmptyMVar
+                                , tryPutMVar, tryTakeMVar)
 import Control.Concurrent       ( runInUnboundThread)
 import Control.Exception        ( IOException, catch)
-import Control.Lens             ( (^.), makeLenses)
+import Control.Lens             ( makeLenses, view)
 import Control.Monad            ( forever, mzero, void)
 import Data.Aeson               ( FromJSON(..), Value(..), (.:), decode)
-import Data.ByteString.Internal (w2c)
+import Data.ByteString.Internal ( w2c)
 import Data.ByteString.Lazy     ( ByteString, hGetContents, unpack)
-import Data.Maybe               ( fromJust)
+import Data.Foldable            ( toList)
+import Data.Maybe               ( isJust)
+import Data.Sequence            ( (<|))
 import Data.Text                ( Text)
-import Data.Time.Clock          ( UTCTime, diffUTCTime)
-import Data.Time.Clock.POSIX    ( getPOSIXTime, posixSecondsToUTCTime)
+import Data.Time.Clock          ( UTCTime)
+import Data.Time.Clock.POSIX    ( posixSecondsToUTCTime)
+import GHC.Float                ( double2Float)
 import Prelude hiding           ( catch)
 import System.Console.CmdArgs   ( Data, Typeable, (&=), cmdArgs, help, summary)
-import System.IO                ( BufferMode(..), hSetBuffering, stdout)
+import System.IO                ( hSetBuffering, BufferMode(..), stdout)
 import System.Locale            ( defaultTimeLocale)
 import System.Process           ( CreateProcess(..), StdStream(..), CmdSpec(..)
                                 , createProcess)
 import System.Time              ( formatCalendarTime, getClockTime
                                 , toCalendarTime)
 import Text.Printf              ( printf)
+import qualified Data.Sequence as S
+
+import Graphics.Gloss
+import Graphics.Gloss.Interface.IO.Simulate
 
 --------------------------------------------------------------------------------
 -- Utility functions
@@ -145,38 +152,61 @@ type Sample = MtgoxResponse MtgoxTicker
 --------------------------------------------------------------------------------
 -- Info fetching
 
-fetchDecode :: FromJSON a => String -> IO a
-fetchDecode = runInUnboundThread . fmap (fromJust . decode) . fetchHTTP
+fetchDecode :: FromJSON a => String -> IO (Maybe a)
+fetchDecode = runInUnboundThread . fmap decode . fetchHTTP
 
-fetchMtgoxTicker :: IO Sample
-fetchMtgoxTicker = fetchDecode tickerURL
+fetchSample :: IO (Maybe Sample)
+fetchSample = fetchDecode tickerURL
   where tickerURL = "https://data.mtgox.com/api/2/BTCUSD/money/ticker"
 
 --------------------------------------------------------------------------------
 -- Main program
 
--- display the fetched Sample
-display :: MVar Sample -> Sample -> IO ()
-display prevsample sample = do
-  -- extract/calculate data to display
-  curtime <- posixSecondsToUTCTime  <$> getPOSIXTime
-  let curticker        = sample^.result
-  let curlast          = curticker^.last_local
-  let curprice         = curlast^.value
-  let curbuy           = curticker^.buy^.value
-  let cursell          = curticker^.sell^.value
-  let curhigh          = curticker^.high^.value
-  let curlow           = curticker^.low^.value
-  let curlag           = show $ diffUTCTime curtime (curticker^.now)
-  -- display it, but only if it's different from previous sample
-  shouldLog <- maybe True (\ps -> ps^.result^.now /= curticker^.now) <$>
-                 tryTakeMVar prevsample
-  if shouldLog
-    then timedLog $ (printf "$%.2f $%.2f-$%.2f L$%.2f H$%.2f %s\n"
-                            curprice curbuy cursell curlow
-                            curhigh curlag :: String)
-    else timedLog "repeat...\n"
-  putMVar prevsample sample
+newtype Timer = Timer (MVar ())
+
+newTimer :: IO Timer
+newTimer = Timer <$> newEmptyMVar
+
+tick :: Timer -> IO Bool
+tick (Timer m) = tryPutMVar m ()
+
+ticked :: Timer -> IO Bool
+ticked (Timer m) = isJust <$> tryTakeMVar m
+
+drawSamples :: [Sample] -> Picture
+drawSamples samples =
+  let rsamples  = reverse samples
+      priceline = view value . view last_local
+      buyline   = view value . view buy
+      sellline  = view value . view sell
+      sep       = [0,0.1..]
+      zipP  f   = zip sep $ map (double2Float . f . view result) rsamples
+      makeL     = line . zipP
+      makeC p   = uncurry translate p $ circle 0.05
+      makeS     = pictures . map makeC . zipP
+  in pictures [ (color green  $ makeL priceline)
+              , (color green  $ makeS priceline)
+              , (color orange $ makeL buyline)
+              , (color cyan   $ makeL sellline)
+              ]
+
+displaySamples :: S.Seq Sample -> IO Picture
+displaySamples samples =
+  pure $ pictures [drawSamples $ toList samples, haxis, vaxis, tens]
+  where haxis = color white $ line [(-100,0), (100,0)]
+        vaxis = color white $ line [(0,-100), (0,100)]
+        tens  = color white $ pictures $ map line $
+                foldr (\n ps -> [(-1,n),(1,n)]:ps) [] [10,20..100]
+
+updateSamples :: Timer -> S.Seq Sample -> IO (S.Seq Sample)
+updateSamples timer samples = do
+  ding <- ticked timer
+  if S.null samples || ding
+    then fetchSample >>= \ms ->
+         pure $ case ms of
+           Just s  -> s <| samples
+           Nothing -> samples
+    else pure samples
 
 -- command line options
 data Cfg = Cfg { delay :: Int }
@@ -185,13 +215,17 @@ data Cfg = Cfg { delay :: Int }
 cmdCfg :: Cfg
 cmdCfg =
   Cfg
-  { delay = 15000000   &= help "sample delay in microseconds"
+  { delay = 90000000 &= help "sample delay in microseconds"
   }
   &= summary "Personal Bitcoin Ticker"
 
 main :: IO ()
-main = hSetBuffering stdout NoBuffering >> (main' =<< cmdArgs cmdCfg)
-  where main' cfg = do
-          psample <- newEmptyMVar
-          every (delay cfg) $
-            timedLog "fetching\r" >> fetchMtgoxTicker >>= display psample
+main = do
+  hSetBuffering stdout NoBuffering
+  cfg   <- cmdArgs cmdCfg
+  timer <- newTimer
+  -- periodically tick the timer
+  void $ forkIO $ every (delay cfg) $ void $ tick timer
+  -- display it
+  simulateIO (InWindow "BitTicker" (800,600) (100,100)) black 1 S.empty
+             displaySamples (\_ _ -> updateSamples timer)
