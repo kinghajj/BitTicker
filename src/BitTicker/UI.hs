@@ -1,67 +1,65 @@
 module BitTicker.UI (launchUI) where
 
-import Control.Applicative      ( pure)
-import Control.Concurrent       ( forkIO)
+import Control.Arrow            ( (>>>))
+import Control.Concurrent       ( MVar, forkIO, newMVar, putMVar, readMVar,
+                                  takeMVar)
 import Control.Lens             ( view)
 import Control.Monad            ( void)
-import GHC.Float                ( double2Float)
+import Control.Monad.Trans      ( liftIO)
 import Data.Foldable            ( toList)
-import Data.Sequence            ( (<|))
-import Graphics.Gloss
-import Graphics.Gloss.Interface.IO.Simulate
+import Graphics.UI.Gtk
+import Diagrams.Backend.Cairo
+import Diagrams.Backend.Gtk
+import Diagrams.Prelude hiding (value, view)
+
 import qualified Data.Sequence as S
 
 import BitTicker.Config
 import BitTicker.Ticker.Mtgox
-import BitTicker.Timer
 import BitTicker.Util
 
-drawTickers :: [MtgoxTicker] -> Picture
-drawTickers samples =
-  let rsamples  = reverse samples
-      -- evenly space the samples at 0.1 unit intervals
-      sep = [0,0.1..]
-      -- take values from ticker and zip with separation intervals
-      zipP f = zip sep $ map (double2Float . f) rsamples
-      -- make a line from ticker values
-      makeL = line . zipP
-      -- make a circle at a given point
-      makeC p = uncurry translate p $ circle 0.05
-      -- make a scatter plot of circles from ticker values
-      makeS = pictures . map makeC . zipP
-      -- various interesting info to track
-      prices = view value . view last_local
-      buys   = view value . view buy
-      sells  = view value . view sell
-  in pictures [ color green  $ makeL prices
-              , color green  $ makeS prices
-              , color orange $ makeL buys
-              , color cyan   $ makeL sells
-              ]
+type History = S.Seq Sample
 
-displaySamples :: S.Seq Sample -> Picture
-displaySamples samples = pictures [drawTickers ticks, haxis, vaxis, tens]
-  where ticks = map getResponse $ filter (not . isError) $ toList samples
-        haxis = color white $ line [(-100,0), (100,0)]
-        vaxis = color white $ line [(0,-100), (0,100)]
-        tens  = color white $ pictures $ map line $
-                foldr (\n ps -> [(-1,n),(1,n)]:ps) [] [10,20..100]
+renderHistory :: History -> Diagram Cairo R2
+renderHistory h =
+  renderLine last_local green <> renderLine buy orange <> renderLine sell blue
+  where resps = toList >>> filter (not . isError) >>> map getResponse $ h
+        renderLine f clr = map (view f) >>> map (view value) >>> zip [1..] >>>
+                           map p2 >>> map (flip (,) $ unitCircle # fc clr) >>>
+                           position $ resps
 
-updateSamples :: Timer -> S.Seq Sample -> IO (S.Seq Sample)
-updateSamples timer samples = do
-  ding <- ticked timer
-  if S.null samples || ding
-    then fetchSample >>= \ms ->
-         pure $ case ms of
-           Just s  -> s <| samples
-           Nothing -> samples
-    else pure samples
+renderDiagram :: History -> Diagram Cairo R2
+renderDiagram history = renderHistory history <> rect 700 500 # fc black
+
+renderMV :: MVar History -> EventM EExpose Bool
+renderMV historymv = do
+  history <- liftIO $ readMVar historymv
+  window  <- eventWindow
+  liftIO $ renderToGtk window $ toGtkCoords $ renderDiagram history
+  pure True
 
 launchUI :: Cfg -> IO ()
 launchUI cfg = do
-  timer <- newTimer
-  -- periodically tick the timer
-  void $ forkIO $ every (delay cfg) $ void $ tick timer
-  -- display it
-  simulateIO (InWindow "BitTicker" (800,600) (100,100)) black 1 S.empty
-             (pure . displaySamples) (\_ _ -> updateSamples timer)
+  -- create mvar to store history of samples
+  historymv <- newMVar S.empty
+  -- initialize the Gtk UI
+  void initGUI
+  window <- windowNew
+  canvas <- drawingAreaNew
+  void $ canvas `on` sizeRequest $ pure (Requisition 800 600)
+  set window [ containerBorderWidth := 10, containerChild := canvas ]
+  void $ canvas `on` exposeEvent $ renderMV historymv
+  void $ onDestroy window mainQuit
+  -- periodically fetch new sample and refresh UI
+  void $ forkIO $ every (delay cfg) $ do
+    putStrLn "Fetching..."
+    history <- takeMVar historymv
+    fetchSample >>= \case
+      (Just s) -> do putStrLn $ show s
+                     putMVar historymv $ (S.|>) history s
+      Nothing  -> putMVar historymv history
+    widgetQueueDraw canvas
+    putStrLn "Finished."
+  -- show it
+  widgetShowAll window
+  mainGUI
