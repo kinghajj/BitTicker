@@ -4,7 +4,7 @@ import Control.Arrow            ( (>>>))
 import Control.Concurrent       ( MVar, forkIO, newMVar, putMVar, readMVar,
                                   takeMVar)
 import Control.Lens             ( view)
-import Control.Monad            ( void)
+import Control.Monad            ( void, when)
 import Control.Monad.Trans      ( liftIO)
 import Data.Foldable            ( toList)
 import Graphics.UI.Gtk
@@ -15,6 +15,7 @@ import Diagrams.Prelude hiding (value, view)
 import qualified Data.Sequence as S
 
 import BitTicker.Config
+import BitTicker.Text
 import BitTicker.Ticker.Mtgox
 import BitTicker.Util
 
@@ -52,7 +53,8 @@ launchUI cfg = do
   void $ forkIO $ every (delay cfg) $ do
     history <- takeMVar historymv
     fetchSample >>= \case
-      (Just s) -> putMVar historymv $ (S.|>) history s
+      (Just s) -> do putMVar historymv $ (S.|>) history s
+                     when (not $ isError s) $ printTicker $ getResponse s
       Nothing  -> putMVar historymv history
     widgetQueueDraw canvas
   -- show it
