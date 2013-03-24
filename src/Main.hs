@@ -12,9 +12,8 @@ import BitTicker.Config         ( Cfg(..), cmdCfg)
 import BitTicker.Text           ( launchText)
 import BitTicker.UI             ( launchUI)
 
+chooseLauncher :: Cfg -> IO ()
+chooseLauncher cfg = (if gui cfg then launchUI else launchText) cfg
+
 main :: IO ()
-main = do
-  hSetBuffering stdout NoBuffering
-  cfg <- cmdArgs cmdCfg
-  let launcher = if (gui cfg) then launchUI else launchText
-  launcher cfg
+main = hSetBuffering stdout NoBuffering >> cmdArgs cmdCfg >>= chooseLauncher
