@@ -15,7 +15,7 @@ cabal-version:       >=1.10
 executable BitTicker
   main-is:             Main.hs
   other-modules:       BitTicker.UI, BitTicker.Ticker.Mtgox, BitTicker.Fetch,
-                       BitTicker.Timer, BitTicker.Config
+                       BitTicker.Config, BitTicker.Text, BitTicker.Util
   build-depends:       base >=4.5, containers >=0.4, mtl >=2.1, lens >=3.8,
                        bytestring >= 0.9, text >=0.11, aeson >=0.6,
                        cmdargs >=0.10, time >=1.4, old-time >=1.1,

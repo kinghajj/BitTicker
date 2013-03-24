@@ -18,8 +18,6 @@ import BitTicker.Config
 import BitTicker.Ticker.Mtgox
 import BitTicker.Util
 
-type History = S.Seq Sample
-
 renderHistory :: History -> Diagram Cairo R2
 renderHistory h =
   renderLine last_local green <> renderLine buy orange <> renderLine sell blue
@@ -52,14 +50,11 @@ launchUI cfg = do
   void $ onDestroy window mainQuit
   -- periodically fetch new sample and refresh UI
   void $ forkIO $ every (delay cfg) $ do
-    putStrLn "Fetching..."
     history <- takeMVar historymv
     fetchSample >>= \case
-      (Just s) -> do putStrLn $ show s
-                     putMVar historymv $ (S.|>) history s
+      (Just s) -> putMVar historymv $ (S.|>) history s
       Nothing  -> putMVar historymv history
     widgetQueueDraw canvas
-    putStrLn "Finished."
   -- show it
   widgetShowAll window
   mainGUI

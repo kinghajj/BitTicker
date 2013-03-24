@@ -8,8 +8,13 @@ module Main where
 
 import System.IO                ( hSetBuffering, BufferMode(..), stdout)
 import System.Console.CmdArgs   ( cmdArgs)
-import BitTicker.Config         ( cmdCfg)
+import BitTicker.Config         ( Cfg(..), cmdCfg)
+import BitTicker.Text           ( launchText)
 import BitTicker.UI             ( launchUI)
 
 main :: IO ()
-main = hSetBuffering stdout NoBuffering >> cmdArgs cmdCfg >>= launchUI
+main = do
+  hSetBuffering stdout NoBuffering
+  cfg <- cmdArgs cmdCfg
+  let launcher = if (gui cfg) then launchUI else launchText
+  launcher cfg

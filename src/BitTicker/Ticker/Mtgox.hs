@@ -8,6 +8,7 @@ import Control.Monad            ( liftM, mzero)
 import Data.Aeson               ( FromJSON(..), Value(..), (.:))
 import Data.Text                ( Text)
 import Data.Time.Clock          ( UTCTime)
+import qualified Data.Sequence as S
 import BitTicker.Fetch
 import BitTicker.Util
 
@@ -98,3 +99,5 @@ getResponse _                 = error "no response (error)"
 fetchSample :: IO (Maybe Sample)
 fetchSample = fetchDecode tickerURL
   where tickerURL = "https://data.mtgox.com/api/2/BTCUSD/money/ticker"
+
+type History = S.Seq Sample
